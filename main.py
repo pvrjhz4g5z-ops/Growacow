@@ -24,6 +24,25 @@ def get_cow(chat_id, user_id):
         "SELECT name, weight, last_grow, streak, last_steal, last_duel FROM cows WHERE chat_id=? AND user_id=?",
         (chat_id, user_id)).fetchone()
 
+@dp.message(lambda m: m.new_chat_members is not None)
+async def on_added(m: types.Message):
+    me = await bot.get_me()
+    for member in m.new_chat_members:
+        if member.id == me.id:
+            await m.reply(
+                "🐄 Хей! Я новий бот-ферма в цьому чаті!\n\n"
+                "Кожен тут може ростити свою корову:\n"
+                "/growcow — погодувати корову (раз на день)\n"
+                "/mycow — моя корова\n"
+                "/namecow Ім'я — назвати корову\n"
+                "/steal — вкрасти кг у суперника\n"
+                "/duel — дуель корів (у відповідь на повідомлення)\n"
+                "/top — топ чату\n"
+                "/global — топ світу\n\n"
+                "Хто виростить найжирнішу корову? 🏆"
+            )
+            return
+
 @dp.message(Command("growcow"))
 async def grow(m: types.Message):
     today = date.today()
@@ -177,6 +196,15 @@ async def duel(m: types.Message):
     await m.reply(f"🤺 Дуель! {winner_name} переміг {loser_name} і забрав {amount} кг!")
 
 async def main():
+    await bot.set_my_commands([
+        types.BotCommand(command="growcow", description="🐄 Погодувати корову"),
+        types.BotCommand(command="mycow", description="📋 Моя корова"),
+        types.BotCommand(command="namecow", description="✏️ Назвати корову"),
+        types.BotCommand(command="steal", description="🥷 Вкрасти кг у суперника"),
+        types.BotCommand(command="duel", description="🤺 Дуель корів (у відповідь)"),
+        types.BotCommand(command="top", description="🏆 Топ чату"),
+        types.BotCommand(command="global", description="🌍 Топ світу"),
+    ])
     await dp.start_polling(bot)
 
 asyncio.run(main())
