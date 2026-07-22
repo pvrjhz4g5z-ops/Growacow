@@ -191,7 +191,7 @@ async def buy(m: types.Message):
     if not row:
         await m.reply("Спочатку заведи корову: /growcow 🐄")
         return
-    cost, gain = 20, 15
+    cost, gain = 40, 15
     if (row[6] or 0) < cost:
         await m.reply(f"💸 Треба {cost} монет, у тебе {row[6] or 0}. Продай кг: /sell")
         return
