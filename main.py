@@ -1,8 +1,9 @@
 import os, random, sqlite3, asyncio
 from datetime import date, timedelta, datetime
 from zoneinfo import ZoneInfo
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.types import LabeledPrice
 
 DB_PATH = os.getenv("DB_PATH", "cows.db")
 db = sqlite3.connect(DB_PATH)
@@ -31,6 +32,7 @@ def today():
     return datetime.now(KYIV).date()
 
 pending_sell = set()
+pending_donate = set()
 
 WEIGHT_BADGES = [
     (10, "🥉 Перші кроки"), (50, "🥈 Міцна корова"), (100, "🥇 Центнер"),
@@ -96,11 +98,12 @@ async def on_added(m: types.Message):
                 "/namecow Ім'я — назвати корову\n"
                 "/steal — вкрасти кг у суперника\n"
                 "/duel — дуель корів (у відповідь)\n"
-                "/sell, /buy — торгівля (раз на день, ліміти оновляються опівночі)\n"
+                "/sell, /buy — торгівля (раз на день, оновлюється опівночі)\n"
                 "/balance — баланс монет\n"
                 "/badges — мої бейджі\n"
                 "/top, /global — топи\n"
-                "/newseason, /legends — сезони (для адмінів)\n\n"
+                "/newseason, /legends — сезони (для адмінів)\n"
+                "/donate — підтримати проєкт зірками ⭐\n\n"
                 "Не годуй корову понад 3 дні — почне худнути! 🏆"
             )
             return
@@ -190,191 +193,59 @@ async def sell_start(m: types.Message):
     pending_sell.add((m.chat.id, m.from_user.id))
     await m.reply(f"✏️ Напиши число — скільки кг продати (у тебе {row[1]} кг):")
 
-@dp.message(lambda m: m.text and m.text.strip().isdigit() and (m.chat.id, m.from_user.id) in pending_sell)
-async def sell_amount(m: types.Message):
-    pending_sell.discard((m.chat.id, m.from_user.id))
-    row = get_cow(m.chat.id, m.from_user.id)
-    kg = int(m.text.strip())
-    if kg <= 0 or kg > row[1]:
-        await m.reply(f"Некоректне число, у тебе {row[1]} кг. Спробуй /sell знову.")
-        return
-    coins_gain = kg * 20 // 15
-    t = today()
-    db.execute("UPDATE cows SET weight=weight-?, coins=coins+?, last_trade=? WHERE chat_id=? AND user_id=?",
-               (kg, coins_gain, t.isoformat(), m.chat.id, m.from_user.id))
-    db.commit()
-    await m.reply(f"💰 Продав {kg} кг за {coins_gain} монет! Наступна торгівля — завтра о 00:00.")
+@dp.message(Command("donate"))
+async def donate_start(m: types.Message):
+    pending_donate.add((m.chat.id, m.from_user.id))
+    await m.reply("⭐ Напиши число — скільки зірок задонатити (наприклад 50):")
 
-@dp.message(Command("buy"))
-async def buy(m: types.Message):
-    row = get_cow(m.chat.id, m.from_user.id)
-    if not row:
-        await m.reply("Спочатку заведи корову: /growcow 🐄")
-        return
-    t = today()
-    if row[9] == t.isoformat():
-        await m.reply("🧊 Актив заморожено на сьогодні. Наступна торгівля — завтра о 00:00.")
-        return
-    cost, kg = 20, 15
-    if (row[6] or 0) < cost:
-        await m.reply(f"💸 Треба {cost} монет, у тебе {row[6] or 0}. Продай кг: /sell")
-        return
-    db.execute("UPDATE cows SET weight=weight+?, coins=coins-?, last_trade=? WHERE chat_id=? AND user_id=?",
-               (kg, cost, t.isoformat(), m.chat.id, m.from_user.id))
-    db.commit()
-    await m.reply(f"🌾 Купив {kg} кг за {cost} монет! Наступна торгівля — завтра о 00:00.")
+@dp.message(lambda m: m.text and m.text.strip().isdigit() and (
+    (m.chat.id, m.from_user.id) in pending_sell or (m.chat.id, m.from_user.id) in pending_donate))
+async def handle_digit_input(m: types.Message):
+    key = (m.chat.id, m.from_user.id)
 
-@dp.message(Command("top"))
-async def top(m: types.Message):
-    rows = db.execute(
-        "SELECT name, weight FROM cows WHERE chat_id=? ORDER BY weight DESC LIMIT 10",
-        (m.chat.id,)).fetchall()
-    if not rows:
-        await m.reply("Ферма пуста 🌾")
-        return
-    text = "🏆 Топ корів чату:\n" + "\n".join(
-        f"{i+1}. {name} — {w} кг" for i, (name, w) in enumerate(rows))
-    await m.reply(text)
-
-@dp.message(Command("global"))
-async def global_top(m: types.Message):
-    rows = db.execute(
-        "SELECT name, MAX(weight) as w FROM cows GROUP BY user_id ORDER BY w DESC LIMIT 10").fetchall()
-    if not rows:
-        await m.reply("Світова ферма ще пуста 🌍")
-        return
-    text = "🌍 Топ корів світу:\n" + "\n".join(
-        f"{i+1}. {name} — {w} кг" for i, (name, w) in enumerate(rows))
-    await m.reply(text)
-
-@dp.message(Command("steal"))
-async def steal(m: types.Message):
-    t = today().isoformat()
-    row = get_cow(m.chat.id, m.from_user.id)
-    if not row:
-        await m.reply("Спочатку заведи корову: /growcow 🐄")
-        return
-    if row[4] == t:
-        await m.reply("🕵️ Ти вже крав сьогодні! Завтра спробуй знову.")
-        return
-
-    victims = db.execute(
-        "SELECT user_id, name, weight FROM cows WHERE chat_id=? AND user_id!=? AND weight>0",
-        (m.chat.id, m.from_user.id)).fetchall()
-    if not victims:
-        await m.reply("Нема в кого красти 🐄")
-        return
-
-    victim_id, victim_name, victim_weight = random.choice(victims)
-    db.execute("UPDATE cows SET last_steal=? WHERE chat_id=? AND user_id=?",
-               (t, m.chat.id, m.from_user.id))
-
-    if random.random() < 0.5:
-        amount = max(1, int(victim_weight * random.uniform(0.05, 0.15)))
-        db.execute("UPDATE cows SET weight=weight-? WHERE chat_id=? AND user_id=?",
-                   (amount, m.chat.id, victim_id))
-        db.execute("UPDATE cows SET weight=weight+? WHERE chat_id=? AND user_id=?",
-                   (amount, m.chat.id, m.from_user.id))
+    if key in pending_sell:
+        pending_sell.discard(key)
+        row = get_cow(m.chat.id, m.from_user.id)
+        kg = int(m.text.strip())
+        if kg <= 0 or kg > row[1]:
+            await m.reply(f"Некоректне число, у тебе {row[1]} кг. Спробуй /sell знову.")
+            return
+        coins_gain = kg * 20 // 15
+        t = today()
+        db.execute("UPDATE cows SET weight=weight-?, coins=coins+?, last_trade=? WHERE chat_id=? AND user_id=?",
+                   (kg, coins_gain, t.isoformat(), m.chat.id, m.from_user.id))
         db.commit()
-        await m.reply(f"🥷 Вдалося! Ти вкрав {amount} кг у {victim_name}.")
+        await m.reply(f"💰 Продав {kg} кг за {coins_gain} монет! Наступна торгівля — завтра о 00:00.")
+        return
+
+    if key in pending_donate:
+        pending_donate.discard(key)
+        stars = int(m.text.strip())
+        if stars < 1 or stars > 2500:
+            await m.reply("Число зірок має бути від 1 до 2500 ⭐")
+            return
+        await bot.send_invoice(
+            chat_id=m.chat.id,
+            title="Підтримати Growacow 🐄",
+            description=f"Донат {stars} ⭐ на розвиток бота",
+            payload=f"donate_{m.from_user.id}_{stars}",
+            currency="XTR",
+            prices=[LabeledPrice(label="Донат", amount=stars)],
+        )
+
+@dp.pre_checkout_query()
+async def pre_checkout(pcq: types.PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pcq.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def successful_payment(m: types.Message):
+    stars = m.successful_payment.total_amount
+    bonus_coins = stars * 2
+    row = get_cow(m.chat.id, m.from_user.id)
+    if row:
+        db.execute("UPDATE cows SET coins=coins+? WHERE chat_id=? AND user_id=?",
+                   (bonus_coins, m.chat.id, m.from_user.id))
+        db.commit()
+        await m.reply(f"🙏 Дякую за {stars} ⭐! Нараховано {bonus_coins} монет у подяку.")
     else:
-        penalty = max(1, int(row[1] * 0.1))
-        db.execute("UPDATE cows SET weight=MAX(weight-?,0) WHERE chat_id=? AND user_id=?",
-                   (penalty, m.chat.id, m.from_user.id))
-        db.commit()
-        await m.reply(f"🚨 Тебе спіймали! Втратив {penalty} кг.")
-
-@dp.message(Command("duel"))
-async def duel(m: types.Message):
-    if not m.reply_to_message or not m.reply_to_message.from_user:
-        await m.reply("Дай /duel у відповідь на повідомлення суперника 🤺")
-        return
-    opponent = m.reply_to_message.from_user
-    if opponent.is_bot:
-        await m.reply("Дай /duel у відповідь на повідомлення живого суперника, не бота 🤺")
-        return
-    if opponent.id == m.from_user.id:
-        await m.reply("Не можна дуелювати самого себе 😅")
-        return
-
-    row1 = get_cow(m.chat.id, m.from_user.id)
-    row2 = get_cow(m.chat.id, opponent.id)
-    if not row1 or not row2:
-        await m.reply("У обох має бути корова: /growcow 🐄")
-        return
-
-    t = today().isoformat()
-    if row1[5] == t:
-        await m.reply("🕒 Ти вже дуелював сьогодні!")
-        return
-
-    w1, w2 = row1[1], row2[1]
-    win1 = random.random() < (w1 / (w1 + w2))
-
-    winner_id, loser_id = (m.from_user.id, opponent.id) if win1 else (opponent.id, m.from_user.id)
-    loser_weight = w2 if win1 else w1
-    amount = max(1, int(loser_weight * 0.1))
-
-    db.execute("UPDATE cows SET weight=weight+? WHERE chat_id=? AND user_id=?",
-               (amount, m.chat.id, winner_id))
-    db.execute("UPDATE cows SET weight=MAX(weight-?,0) WHERE chat_id=? AND user_id=?",
-               (amount, m.chat.id, loser_id))
-    db.execute("UPDATE cows SET last_duel=? WHERE chat_id=? AND user_id=?",
-               (t, m.chat.id, m.from_user.id))
-    db.commit()
-
-    winner_name = m.from_user.first_name if win1 else opponent.first_name
-    loser_name = opponent.first_name if win1 else m.from_user.first_name
-    await m.reply(f"🤺 Дуель! {winner_name} переміг {loser_name} і забрав {amount} кг!")
-
-@dp.message(Command("newseason"))
-async def newseason(m: types.Message):
-    member = await bot.get_chat_member(m.chat.id, m.from_user.id)
-    if member.status not in ("creator", "administrator"):
-        await m.reply("🔒 Тільки адмін чату може закрити сезон.")
-        return
-
-    champ = db.execute(
-        "SELECT name, weight FROM cows WHERE chat_id=? ORDER BY weight DESC LIMIT 1",
-        (m.chat.id,)).fetchone()
-    if not champ or champ[1] == 0:
-        await m.reply("Ферма пуста, нема кого коронувати 🌾")
-        return
-
-    db.execute("INSERT INTO hall_of_fame(chat_id, name, weight, ended_at) VALUES(?,?,?,?)",
-               (m.chat.id, champ[0], champ[1], today().isoformat()))
-    db.execute("UPDATE cows SET weight=0, streak=0, badges='' WHERE chat_id=?", (m.chat.id,))
-    db.commit()
-    await m.reply(f"🎉 Сезон завершено! Чемпіон: {champ[0]} з {champ[1]} кг!\nВсі ваги обнулено, новий сезон почався 🐄")
-
-@dp.message(Command("legends"))
-async def legends(m: types.Message):
-    rows = db.execute(
-        "SELECT name, weight, ended_at FROM hall_of_fame WHERE chat_id=? ORDER BY ended_at DESC LIMIT 10",
-        (m.chat.id,)).fetchall()
-    if not rows:
-        await m.reply("Зал слави ще пустий. Заверши перший сезон: /newseason 🏆")
-        return
-    text = "👑 Зал слави:\n" + "\n".join(
-        f"{d} — {name} ({w} кг)" for name, w, d in rows)
-    await m.reply(text)
-
-async def main():
-    await bot.set_my_commands([
-        types.BotCommand(command="growcow", description="🐄 Погодувати корову"),
-        types.BotCommand(command="mycow", description="📋 Моя корова"),
-        types.BotCommand(command="namecow", description="✏️ Назвати корову"),
-        types.BotCommand(command="steal", description="🥷 Вкрасти кг у суперника"),
-        types.BotCommand(command="duel", description="🤺 Дуель корів (у відповідь)"),
-        types.BotCommand(command="sell", description="💰 Продати кг (введеш число)"),
-        types.BotCommand(command="buy", description="🌾 Купити 15 кг за 20 монет"),
-        types.BotCommand(command="balance", description="💰 Мій баланс"),
-        types.BotCommand(command="badges", description="🎖 Мої бейджі"),
-        types.BotCommand(command="top", description="🏆 Топ чату"),
-        types.BotCommand(command="global", description="🌍 Топ світу"),
-        types.BotCommand(command="newseason", description="🎉 Закрити сезон (адмін)"),
-        types.BotCommand(command="legends", description="👑 Зал слави"),
-    ])
-    await dp.start_polling(bot)
-
-asyncio.run(main())
+        await m.reply(f"🙏 Дякую за {stars}
