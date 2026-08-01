@@ -227,8 +227,8 @@ async def handle_digit_input(m: types.Message):
         await bot.send_invoice(
             chat_id=m.chat.id,
             title="Підтримати Growacow 🐄",
-            description=f"Донат {stars} ⭐ на розвиток бота",
-            payload=f"donate_{m.from_user.id}_{stars}",
+            description="Донат " + str(stars) + " зірок на розвиток бота",
+            payload="donate_" + str(m.from_user.id) + "_" + str(stars),
             currency="XTR",
             prices=[LabeledPrice(label="Донат", amount=stars)],
         )
@@ -246,6 +246,182 @@ async def successful_payment(m: types.Message):
         db.execute("UPDATE cows SET coins=coins+? WHERE chat_id=? AND user_id=?",
                    (bonus_coins, m.chat.id, m.from_user.id))
         db.commit()
-        await m.reply(f"🙏 Дякую за {stars} ⭐! Нараховано {bonus_coins} монет у подяку.")
+        thanks = "Дякую за " + str(stars) + " зірок! Нараховано " + str(bonus_coins) + " монет у подяку."
+        await m.reply("🙏 " + thanks)
     else:
-        await m.reply(f"🙏 Дякую за {stars}
+        await m.reply("🙏 Дякую за " + str(stars) + " зірок!")
+
+@dp.message(Command("buy"))
+async def buy(m: types.Message):
+    row = get_cow(m.chat.id, m.from_user.id)
+    if not row:
+        await m.reply("Спочатку заведи корову: /growcow 🐄")
+        return
+    t = today()
+    if row[9] == t.isoformat():
+        await m.reply("🧊 Актив заморожено на сьогодні. Наступна торгівля — завтра о 00:00.")
+        return
+    cost, kg = 20, 15
+    if (row[6] or 0) < cost:
+        await m.reply(f"💸 Треба {cost} монет, у тебе {row[6] or 0}. Продай кг: /sell")
+        return
+    db.execute("UPDATE cows SET weight=weight+?, coins=coins-?, last_trade=? WHERE chat_id=? AND user_id=?",
+               (kg, cost, t.isoformat(), m.chat.id, m.from_user.id))
+    db.commit()
+    await m.reply(f"🌾 Купив {kg} кг за {cost} монет! Наступна торгівля — завтра о 00:00.")
+
+@dp.message(Command("top"))
+async def top(m: types.Message):
+    rows = db.execute(
+        "SELECT name, weight FROM cows WHERE chat_id=? ORDER BY weight DESC LIMIT 10",
+        (m.chat.id,)).fetchall()
+    if not rows:
+        await m.reply("Ферма пуста 🌾")
+        return
+    text = "🏆 Топ корів чату:\n" + "\n".join(
+        f"{i+1}. {name} — {w} кг" for i, (name, w) in enumerate(rows))
+    await m.reply(text)
+
+@dp.message(Command("global"))
+async def global_top(m: types.Message):
+    rows = db.execute(
+        "SELECT name, MAX(weight) as w FROM cows GROUP BY user_id ORDER BY w DESC LIMIT 10").fetchall()
+    if not rows:
+        await m.reply("Світова ферма ще пуста 🌍")
+        return
+    text = "🌍 Топ корів світу:\n" + "\n".join(
+        f"{i+1}. {name} — {w} кг" for i, (name, w) in enumerate(rows))
+    await m.reply(text)
+
+@dp.message(Command("steal"))
+async def steal(m: types.Message):
+    t = today().isoformat()
+    row = get_cow(m.chat.id, m.from_user.id)
+    if not row:
+        await m.reply("Спочатку заведи корову: /growcow 🐄")
+        return
+    if row[4] == t:
+        await m.reply("🕵️ Ти вже крав сьогодні! Завтра спробуй знову.")
+        return
+
+    victims = db.execute(
+        "SELECT user_id, name, weight FROM cows WHERE chat_id=? AND user_id!=? AND weight>0",
+        (m.chat.id, m.from_user.id)).fetchall()
+    if not victims:
+        await m.reply("Нема в кого красти 🐄")
+        return
+
+    victim_id, victim_name, victim_weight = random.choice(victims)
+    db.execute("UPDATE cows SET last_steal=? WHERE chat_id=? AND user_id=?",
+               (t, m.chat.id, m.from_user.id))
+
+    if random.random() < 0.5:
+        amount = max(1, int(victim_weight * random.uniform(0.05, 0.15)))
+        db.execute("UPDATE cows SET weight=weight-? WHERE chat_id=? AND user_id=?",
+                   (amount, m.chat.id, victim_id))
+        db.execute("UPDATE cows SET weight=weight+? WHERE chat_id=? AND user_id=?",
+                   (amount, m.chat.id, m.from_user.id))
+        db.commit()
+        await m.reply(f"🥷 Вдалося! Ти вкрав {amount} кг у {victim_name}.")
+    else:
+        penalty = max(1, int(row[1] * 0.1))
+        db.execute("UPDATE cows SET weight=MAX(weight-?,0) WHERE chat_id=? AND user_id=?",
+                   (penalty, m.chat.id, m.from_user.id))
+        db.commit()
+        await m.reply(f"🚨 Тебе спіймали! Втратив {penalty} кг.")
+
+@dp.message(Command("duel"))
+async def duel(m: types.Message):
+    if not m.reply_to_message or not m.reply_to_message.from_user:
+        await m.reply("Дай /duel у відповідь на повідомлення суперника 🤺")
+        return
+    opponent = m.reply_to_message.from_user
+    if opponent.is_bot:
+        await m.reply("Дай /duel у відповідь на повідомлення живого суперника, не бота 🤺")
+        return
+    if opponent.id == m.from_user.id:
+        await m.reply("Не можна дуелювати самого себе 😅")
+        return
+
+    row1 = get_cow(m.chat.id, m.from_user.id)
+    row2 = get_cow(m.chat.id, opponent.id)
+    if not row1 or not row2:
+        await m.reply("У обох має бути корова: /growcow 🐄")
+        return
+
+    t = today().isoformat()
+    if row1[5] == t:
+        await m.reply("🕒 Ти вже дуелював сьогодні!")
+        return
+
+    w1, w2 = row1[1], row2[1]
+    win1 = random.random() < (w1 / (w1 + w2))
+
+    winner_id, loser_id = (m.from_user.id, opponent.id) if win1 else (opponent.id, m.from_user.id)
+    loser_weight = w2 if win1 else w1
+    amount = max(1, int(loser_weight * 0.1))
+
+    db.execute("UPDATE cows SET weight=weight+? WHERE chat_id=? AND user_id=?",
+               (amount, m.chat.id, winner_id))
+    db.execute("UPDATE cows SET weight=MAX(weight-?,0) WHERE chat_id=? AND user_id=?",
+               (amount, m.chat.id, loser_id))
+    db.execute("UPDATE cows SET last_duel=? WHERE chat_id=? AND user_id=?",
+               (t, m.chat.id, m.from_user.id))
+    db.commit()
+
+    winner_name = m.from_user.first_name if win1 else opponent.first_name
+    loser_name = opponent.first_name if win1 else m.from_user.first_name
+    await m.reply(f"🤺 Дуель! {winner_name} переміг {loser_name} і забрав {amount} кг!")
+
+@dp.message(Command("newseason"))
+async def newseason(m: types.Message):
+    member = await bot.get_chat_member(m.chat.id, m.from_user.id)
+    if member.status not in ("creator", "administrator"):
+        await m.reply("🔒 Тільки адмін чату може закрити сезон.")
+        return
+
+    champ = db.execute(
+        "SELECT name, weight FROM cows WHERE chat_id=? ORDER BY weight DESC LIMIT 1",
+        (m.chat.id,)).fetchone()
+    if not champ or champ[1] == 0:
+        await m.reply("Ферма пуста, нема кого коронувати 🌾")
+        return
+
+    db.execute("INSERT INTO hall_of_fame(chat_id, name, weight, ended_at) VALUES(?,?,?,?)",
+               (m.chat.id, champ[0], champ[1], today().isoformat()))
+    db.execute("UPDATE cows SET weight=0, streak=0, badges='' WHERE chat_id=?", (m.chat.id,))
+    db.commit()
+    await m.reply(f"🎉 Сезон завершено! Чемпіон: {champ[0]} з {champ[1]} кг!\nВсі ваги обнулено, новий сезон почався 🐄")
+
+@dp.message(Command("legends"))
+async def legends(m: types.Message):
+    rows = db.execute(
+        "SELECT name, weight, ended_at FROM hall_of_fame WHERE chat_id=? ORDER BY ended_at DESC LIMIT 10",
+        (m.chat.id,)).fetchall()
+    if not rows:
+        await m.reply("Зал слави ще пустий. Заверши перший сезон: /newseason 🏆")
+        return
+    text = "👑 Зал слави:\n" + "\n".join(
+        f"{d} — {name} ({w} кг)" for name, w, d in rows)
+    await m.reply(text)
+
+async def main():
+    await bot.set_my_commands([
+        types.BotCommand(command="growcow", description="🐄 Погодувати корову"),
+        types.BotCommand(command="mycow", description="📋 Моя корова"),
+        types.BotCommand(command="namecow", description="✏️ Назвати корову"),
+        types.BotCommand(command="steal", description="🥷 Вкрасти кг у суперника"),
+        types.BotCommand(command="duel", description="🤺 Дуель корів (у відповідь)"),
+        types.BotCommand(command="sell", description="💰 Продати кг (введеш число)"),
+        types.BotCommand(command="buy", description="🌾 Купити 15 кг за 20 монет"),
+        types.BotCommand(command="balance", description="💰 Мій баланс"),
+        types.BotCommand(command="badges", description="🎖 Мої бейджі"),
+        types.BotCommand(command="top", description="🏆 Топ чату"),
+        types.BotCommand(command="global", description="🌍 Топ світу"),
+        types.BotCommand(command="newseason", description="🎉 Закрити сезон (адмін)"),
+        types.BotCommand(command="legends", description="👑 Зал слави"),
+        types.BotCommand(command="donate", description="⭐ Підтримати зірками"),
+    ])
+    await dp.start_polling(bot)
+
+asyncio.run(main())
